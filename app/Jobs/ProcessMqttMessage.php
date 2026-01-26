@@ -33,6 +33,13 @@ class ProcessMqttMessage implements ShouldQueue
         '61-47685-975', // olijfwilgstraat 18
         '63-99295-496',
         '66-54422-956',
+
+        // Vattenfall IDs
+        '82-39914-255', '46-29703-477', '86-11855-361', '80-53300-950', '31-10262-436', '55-13862-738', '46-61892-621',
+        '60-49222-642', '41-81155-122', '86-15507-145', '31-61896-425', '11-89073-780', '30-86149-946', '59-66131-868',
+        '26-52637-672', '87-86419-160', '93-12741-210', '94-97835-802', '85-46996-743', '46-60263-483', '10-64949-752',
+        '86-64941-628', '67-85308-504', '55-52149-385', '48-77058-992', '39-28648-309', '19-22018-523', '27-27905-457',
+        '96-59758-165', '52-27709-616', '40-95501-141', '19-67806-950', '59-87220-266', '29-32368-395', '98-34177-126',
     ];
 
     static array $translationTable = [
@@ -91,6 +98,20 @@ class ProcessMqttMessage implements ShouldQueue
     }
 
     /**
+     * Get 5-minute time bucket start in Europe/Amsterdam.
+     *
+     * @param int $unixTimestamp Seconds since epoch (UTC)
+     * @return Carbon Bucket start (Europe/Amsterdam timezone)
+     */
+    function timeBucketAmsterdam(int $unixTimestamp): Carbon
+    {
+        return Carbon::createFromTimestampUTC($unixTimestamp)
+            ->setTimezone('Europe/Amsterdam')
+            ->floorMinutes(5)
+            ->second(0);
+    }
+
+    /**
      * Execute the job.
      */
     public function handle()
@@ -121,11 +142,13 @@ class ProcessMqttMessage implements ShouldQueue
         // Prepare log rows
         $now = \Carbon\Carbon::now();
         $logRows = [];
+        $logRows2 = [];
 
         // Override $now if $message['timestamp'] exists
         if (isset($data['timestamp'])) $now = \Carbon\Carbon::createFromTimestamp($data['timestamp']);
 
         // Log every 5 mins to file for Vattenfall demo
+        // 2026-01-26 <DEPRECATION NOTICE> This is no longer needed, as we have proper DB storage and reporting now.
         if ($this->topic === 'controller/57-52439-867') {
             // Logs every request
             $filePath = public_path("vf/$admin_id.txt");
@@ -138,6 +161,7 @@ class ProcessMqttMessage implements ShouldQueue
                 FILE_APPEND
             );
         }
+        // </DEPRECATION NOTICE>
 
         // Write a JSON entry to {$admin_id}.txt in public/mqtt
         $filePath = public_path("mqtt/{$admin_id}.txt");
@@ -155,18 +179,21 @@ class ProcessMqttMessage implements ShouldQueue
         );
 
 
+        // 2026-01-26 We're now dual logging it (LogEvents can be phased out actually)
+        $saveToLogEvents = true;
+        $saveToLogEvents2 = true;
+
         // Only save to DB if no data saved within past 14 minutes
         if ($sensor->last_package) {
             $lastPackageTime = strtotime($sensor->last_package);
             $nowTime = time();
             $diffInMinutes = ($nowTime - $lastPackageTime) / 60;
             if ($diffInMinutes < 14) {
-                return;
+                $saveToLogEvents = false;
             }
         }
 
         $smartMeterData_isComplete = (!empty($data['EtoGridT1WhCum']) && !empty($data['EtoGridT2WhCum']) && !empty($data['EfromGridT1WhCum']) && !empty($data['EfromGridT2WhCum']));
-
         foreach ($data as $metricKey => $metricValue) {
 
             // Skip unknown keys
@@ -188,6 +215,14 @@ class ProcessMqttMessage implements ShouldQueue
                 'time' => $now,
                 'value' => $metricValue * $conversion_rate,
             ];
+
+            $logRows2[] = [
+                'sensor_id' => $sensor->id,
+                'type' => $type,
+                'value' => $metricValue * $conversion_rate,
+                'time_bucket' => $this->timeBucketAmsterdam($data['timestamp']),
+                'time_true' => $now,
+            ];
         }
 
         // Add virtual 'NET' value that's EG1+EG2-FG1-FG2 !empty
@@ -200,10 +235,19 @@ class ProcessMqttMessage implements ShouldQueue
                 'time' => $now,
                 'value' => $netValue,
             ];
+
+            $logRows2[] = [
+                'sensor_id' => $sensor->id,
+                'type' => 'NET',
+                'value' => $netValue,
+                'time_bucket' => $this->timeBucketAmsterdam($data['timestamp']),
+                'time_true' => $now,
+            ];
         }
 
         // Bulk insert
-        DB::table('log_events')->insert($logRows);
+        if ($saveToLogEvents) DB::table('log_events')->insert($logRows);
+        if ($saveToLogEvents2) DB::table('log_events2')->insert($logRows2);
 
         // Update last package time
         $sensor->last_package = $now;
