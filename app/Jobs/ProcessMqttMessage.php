@@ -249,9 +249,11 @@ class ProcessMqttMessage implements ShouldQueue
         if ($saveToLogEvents) DB::table('log_events')->insert($logRows);
         if ($saveToLogEvents2) DB::table('log_events2')->insert($logRows2);
 
-        // Update last package time
-        $sensor->last_package = $now;
-        $sensor->save();
+        // Update last package time (for the purpose of throttling to 15 mintes for log_events)
+        if ($saveToLogEvents) {
+            $sensor->last_package = $now;
+            $sensor->save();
+        }
     }
 
     public function tags(): array
